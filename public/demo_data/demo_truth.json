@@ -1,0 +1,40 @@
+{
+  "type": "controlled_demo_pair",
+  "before": "before_demo.png",
+  "after": "after_demo.png",
+  "same_scene": true,
+  "georeferenced": false,
+  "intended_changes": [
+    {
+      "category": "building",
+      "description": "New building-like structure added in the upper-right open plot",
+      "bbox_pixels": [
+        505,
+        34,
+        620,
+        106
+      ]
+    },
+    {
+      "category": "vegetation",
+      "description": "Vegetation-clearance patch introduced in center-right area",
+      "bbox_pixels": [
+        397,
+        151,
+        527,
+        246
+      ]
+    },
+    {
+      "category": "terrain",
+      "description": "Earth/soil-like cleared strip added near lower center-right",
+      "bbox_pixels": [
+        350,
+        205,
+        468,
+        238
+      ]
+    }
+  ],
+  "note": "Controlled visual demo only. This is not a measured real-world change and should not be presented as geospatial ground truth."
+}
