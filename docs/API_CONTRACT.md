@@ -46,6 +46,8 @@ Both analysis endpoints return the common analysis fields: `ok`, `query`, `categ
 - `regions` and `semantic_regions` are image-coordinate bounding-box features, with normalized coordinates; they are not geospatial polygons.
 - `visuals` contains base64 PNG payloads: `overlay_png`, `heatmap_png`, `mask_png`, and optionally `semantic_overlay_png`.
 - `semantic.backend` can identify `sentinel2_ndvi`, `sentinel2_ndwi`, `segformer`, or `deterministic_visual_fallback`; its confidence must not be interpreted as validated remote-sensing uncertainty.
+- Catalog responses additionally include `quality` with per-scene cloud percentage, valid-pixel fraction, NoData fraction, and a `registration_status`; these are operational diagnostics, not model-quality metrics.
+- Catalog responses include `geospatial` when a verified raster grid is available: `aoi_area_m2`, `changed_area_m2`, `changed_area_ha`, and `changed_percentage`. Manual image uploads do not include geographic area because their CRS/grid metadata is not part of the backend request.
 
 The temporal endpoint additionally returns `pair_id`, `analysis_source: "satellite_catalog"`, `location`, `before`, `after`, `provenance`, `general_change`, and base64 `before_png`/`after_png` visuals.
 

@@ -13,9 +13,10 @@ The long-term objective is an industry-grade, scientifically defensible satellit
   - `POST /analyze` for a user-provided image pair.
   - `POST /api/temporal-analysis` for location/date-driven Sentinel-2 retrieval and analysis.
 - Location/date retrieval from Element84 Earth Search STAC using Sentinel-2 L2A scenes, with Nominatim geocoding when a location name is supplied.
-- Same-AOI scene handling, per-band loading, common-grid reprojection, and an in-memory pair cache.
+- Same-AOI scene handling, B04-target common-grid reprojection, valid/NoData pixel checks, and an in-memory pair cache.
 - A classical visual-change baseline: registration where needed, LAB normalization, color/edge differencing, adaptive thresholding, morphology, and connected-component filtering.
-- NDVI-based vegetation and NDWI-based water enrichment when NIR is available.
+- NDVI-based vegetation and NDWI-based water enrichment when NIR is available; B11/B12 support is retained for future correctly aligned SWIR products, including NDBI, but NDBI is not currently used for semantic decisions.
+- Physical AOI and change-area reporting for catalog imagery only, computed from the analysis grid and valid-pixel mask rather than display dimensions.
 - Controlled local demo assets in `public/demo_data/`; their README states they are not georeferenced ground truth.
 
 ## What must not be claimed

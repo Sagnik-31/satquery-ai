@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import numpy as np
+from rasterio.crs import CRS
+from rasterio.transform import from_origin
 
 import main
+from satellite_service import RasterGrid
 
 
 def test_calculate_difference_is_zero_for_identical_images(rgb_pair):
@@ -33,6 +36,8 @@ def test_spectral_indices_follow_the_implemented_formula():
 
     assert np.allclose(main.compute_ndvi(red, nir), [[(0.6 - 0.2) / (0.6 + 0.2 + 1e-6)]])
     assert np.allclose(main.compute_ndwi(green, nir), [[(0.3 - 0.6) / (0.3 + 0.6 + 1e-6)]])
+    swir = np.array([[0.8]], dtype=np.float32)
+    assert np.allclose(main.compute_ndbi(swir, nir), [[(0.8 - 0.6) / (0.8 + 0.6 + 1e-6)]])
 
 
 def test_query_classification_routes_supported_categories():
@@ -56,6 +61,27 @@ def test_run_change_analysis_returns_bounded_visual_metrics(rgb_pair):
     assert result["alignment"]["success"] is False
     assert result["visuals"]["mask_png"]
     assert "not model accuracy" in result["disclaimer"]
+
+
+def test_run_change_analysis_reports_physical_area_only_with_a_grid(rgb_pair):
+    before, after = rgb_pair
+    grid = RasterGrid(
+        shape=before.shape[:2],
+        transform=from_origin(0, 640, 10, 10),
+        crs=CRS.from_epsg(3857),
+    )
+    result = main.run_change_analysis(
+        before,
+        after,
+        "What changed?",
+        min_area=100,
+        geospatial_grid=grid,
+        valid_mask=np.ones(grid.shape, dtype=bool),
+    )
+
+    assert result["geospatial"] is not None
+    assert result["geospatial"]["aoi_area_m2"] == 64 * 64 * 100
+    assert result["geospatial"]["changed_area_m2"] >= 0
 
 
 def test_spectral_vegetation_enrichment_uses_change_mask(spectral_bands):

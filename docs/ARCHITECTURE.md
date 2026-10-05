@@ -36,7 +36,13 @@ External services
 
 ### Location/date pair
 
-`/api/temporal-analysis` validates a JSON request, computes a cache key, and retrieves a pair if it is not cached. Retrieval resolves a location or coordinates, derives/uses an AOI bounding box, selects a historical scene near the requested date and a later latest scene, loads Sentinel-2 bands, and aligns the later bands to the earlier grid. The analysis response includes provenance and encoded before/after PNGs.
+`/api/temporal-analysis` validates a JSON request, computes a cache key, and retrieves a pair if it is not cached. Retrieval resolves a location or coordinates, derives/uses an AOI bounding box, selects a historical scene near the requested date and a later latest scene, and loads Sentinel-2 bands. B04 defines the target T1 grid; every available T1/T2 band is explicitly checked and resampled to that grid when CRS, affine transform, shape, resolution, or bounds differ. The analysis response includes provenance, scene-quality fields, physical-area fields, and encoded before/after PNGs.
+
+### Catalog preprocessing and quality
+
+The current catalog path requests B02 (blue), B03 (green), B04 (red), B08 (NIR), and—when supplied by the STAC item—B11 and B12 (SWIR). B02/B03/B04/B08 are normally 10 m Sentinel-2 bands; B11/B12 are normally 20 m and are bilinearly resampled to the B04 target grid before analysis. Raster reads retain `float32` analysis arrays and a valid-pixel mask derived from Rasterio masking/NoData handling. Per-band provenance records source CRS, transform, shape, resolution, source dtype, declared NoData, source valid/NoData fractions, and whether resampling occurred. The API reports valid-pixel and NoData fractions, while STAC scene cloud cover and any available cloud-shadow/NoData metadata are kept in provenance/warnings.
+
+The system rejects catalog scenes with fewer than 50% valid RGB pixels in the AOI and warns below 80%. These are operational quality gates, not accuracy measurements.
 
 ## Classical baseline pipeline
 
@@ -48,7 +54,7 @@ External services
 6. Apply opening/closing morphology, filter connected components, and form contours.
 7. Return masks, a heatmap, an overlay, bounding-box regions, and descriptive metrics.
 
-This is image processing, not supervised change detection. It is sensitive to residual misregistration, seasonal effects, illumination, clouds, shadows, atmosphere, and scene-selection differences.
+This is image processing, not supervised change detection. It is sensitive to residual misregistration, seasonal effects, illumination, clouds, shadows, atmosphere, and scene-selection differences. For catalog results, changed area is calculated from the verified raster grid and the valid AOI mask in square metres/hectares; manual uploads remain image-only and do not receive geographic-area outputs.
 
 ## Semantic enrichment path
 

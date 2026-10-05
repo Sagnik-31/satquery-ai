@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+from rasterio.transform import from_origin
 
 import satellite_service
 
@@ -121,3 +122,70 @@ def test_equal_shape_with_matching_grid_skips_reprojection(raster_grids):
     )
 
     assert aligned is band
+
+
+def test_different_shape_with_equivalent_extent_is_resampled_to_target_grid(raster_grids):
+    source = np.array([[1, 2], [3, 4]], dtype=np.float32)
+    source_grid = satellite_service.RasterGrid(
+        shape=(2, 2),
+        transform=from_origin(0, 4, 2, 2),
+        crs=raster_grids["wgs84"],
+    )
+    target_grid = satellite_service.RasterGrid(
+        shape=(4, 4),
+        transform=raster_grids["reference_transform"],
+        crs=raster_grids["wgs84"],
+    )
+
+    aligned = satellite_service._align_band_to_reference(
+        source,
+        source_grid.transform,
+        source_grid.crs,
+        target_grid.shape,
+        target_grid.transform,
+        target_grid.crs,
+    )
+
+    assert aligned.shape == target_grid.shape
+    assert np.isfinite(aligned).all()
+    assert not satellite_service.grids_compatible(source_grid, target_grid)
+
+
+def test_geospatial_area_uses_projected_grid_and_valid_pixels(raster_grids):
+    grid = satellite_service.RasterGrid(
+        shape=(2, 2),
+        transform=from_origin(0, 20, 10, 10),
+        crs=raster_grids["web_mercator"],
+    )
+    valid = np.array([[True, True], [True, False]])
+    changed = np.array([[255, 0], [255, 255]], dtype=np.uint8)
+
+    areas = satellite_service.calculate_geospatial_areas(changed, valid, grid)
+
+    assert areas["aoi_area_m2"] == 300.0
+    assert areas["changed_area_m2"] == 200.0
+    assert areas["changed_area_ha"] == 0.02
+    assert np.isclose(areas["changed_percentage"], 200 / 300 * 100)
+
+
+def test_scaled_grid_preserves_extent_for_display_downsampling(raster_grids):
+    grid = satellite_service.RasterGrid(
+        shape=(4, 4),
+        transform=raster_grids["reference_transform"],
+        crs=raster_grids["web_mercator"],
+    )
+
+    scaled = grid.scaled_to((2, 2))
+
+    assert scaled.bounds == grid.bounds
+    assert scaled.resolution == (2.0, 2.0)
+
+
+def test_quality_tracks_valid_and_nodata_fractions():
+    quality = satellite_service._quality_from_valid_mask(
+        np.array([[True, False], [True, True]]),
+        band_details={"B04": {"dtype": "float32"}},
+    )
+
+    assert quality["valid_pixel_fraction"] == 0.75
+    assert quality["nodata_fraction"] == 0.25

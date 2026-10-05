@@ -1,7 +1,7 @@
 """Satellite imagery retrieval for SatQuery AI temporal analysis.
 
-Uses Element84 Earth Search STAC (Sentinel-2 L2A) with optional
-Microsoft Planetary Computer fallback. No API keys required for Earth Search.
+Uses Element84 Earth Search STAC (Sentinel-2 L2A). No API keys are required
+for the configured public Earth Search endpoint.
 """
 
 from __future__ import annotations
@@ -30,6 +30,8 @@ try:
     import rasterio
     from rasterio.enums import Resampling
     from rasterio.warp import reproject, transform_bounds
+    from rasterio.transform import array_bounds
+    from pyproj import Geod, Transformer
     RASTERIO_AVAILABLE = True
 except ImportError:
     rasterio = None
@@ -46,6 +48,8 @@ USER_AGENT = os.getenv(
     "SatQuery-AI/1.0 (hackathon; contact: demo@satquery.local)",
 )
 MAX_OUTPUT_PX = int(os.getenv("SATELLITE_MAX_PX", "1400"))
+MIN_VALID_PIXEL_FRACTION = 0.50
+WARN_VALID_PIXEL_FRACTION = 0.80
 
 # Filled after RetrievedPair is defined.
 _PAIR_CACHE: dict[str, Any] = {}
@@ -67,6 +71,126 @@ class SceneMetadata:
     stac_id: str
     mgrs_tile: str = ""
     platform: str = "Sentinel-2"
+    product: str = "Sentinel-2 L2A surface reflectance"
+    cloud_shadow_percent: float | None = None
+    metadata_nodata_percent: float | None = None
+
+
+@dataclass(frozen=True)
+class RasterGrid:
+    """A complete raster grid definition for safe temporal comparison."""
+
+    shape: tuple[int, int]
+    transform: Any
+    crs: Any
+
+    @property
+    def resolution(self) -> tuple[float, float]:
+        return (abs(float(self.transform.a)), abs(float(self.transform.e)))
+
+    @property
+    def bounds(self) -> tuple[float, float, float, float]:
+        return tuple(float(v) for v in array_bounds(*self.shape, self.transform))
+
+    def scaled_to(self, shape: tuple[int, int]) -> "RasterGrid":
+        """Return the same geographic extent represented by a new array shape."""
+        src_h, src_w = self.shape
+        dst_h, dst_w = shape
+        if (src_h, src_w) == (dst_h, dst_w):
+            return self
+        return RasterGrid(
+            shape=shape,
+            transform=self.transform * rasterio.Affine.scale(src_w / dst_w, src_h / dst_h),
+            crs=self.crs,
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "crs": str(self.crs),
+            "shape": list(self.shape),
+            "transform": [round(float(v), 12) for v in self.transform[:6]],
+            "resolution": [round(v, 8) for v in self.resolution],
+            "bounds": [round(v, 8) for v in self.bounds],
+        }
+
+
+def grids_compatible(source: RasterGrid, target: RasterGrid) -> bool:
+    """Require CRS, transform, dimensions, resolution, and extent agreement."""
+    return (
+        source.shape == target.shape
+        and source.crs == target.crs
+        and source.transform == target.transform
+        and source.resolution == target.resolution
+        and source.bounds == target.bounds
+    )
+
+
+def _reproject_to_grid(
+    data: np.ndarray,
+    source: RasterGrid,
+    target: RasterGrid,
+    *,
+    resampling: Any,
+) -> np.ndarray:
+    if grids_compatible(source, target):
+        return data
+    destination = np.full(target.shape, np.nan, dtype=np.float32)
+    reproject(
+        source=data.astype(np.float32, copy=False),
+        destination=destination,
+        src_transform=source.transform,
+        src_crs=source.crs,
+        src_nodata=np.nan,
+        dst_transform=target.transform,
+        dst_crs=target.crs,
+        dst_nodata=np.nan,
+        resampling=resampling,
+    )
+    return destination
+
+
+def calculate_geospatial_areas(
+    change_mask: np.ndarray,
+    valid_mask: np.ndarray,
+    grid: RasterGrid,
+) -> dict[str, float]:
+    """Calculate AOI and changed area from a raster grid, never display pixels."""
+    if change_mask.shape != grid.shape or valid_mask.shape != grid.shape:
+        raise ValueError("Masks must match the raster grid used for area calculation.")
+
+    valid = valid_mask.astype(bool)
+    changed = (change_mask > 0) & valid
+
+    if grid.crs and grid.crs.is_projected:
+        unit_factor = float(getattr(grid.crs, "linear_units_factor", (None, 1.0))[1] or 1.0)
+        pixel_area_m2 = abs(grid.transform.a * grid.transform.e - grid.transform.b * grid.transform.d) * unit_factor**2
+        areas = np.full(grid.shape, pixel_area_m2, dtype=np.float64)
+    elif grid.crs and grid.crs.is_geographic:
+        geod = Geod(ellps="WGS84")
+        transformer = Transformer.from_crs(grid.crs, "EPSG:4326", always_xy=True)
+        areas = np.zeros(grid.shape, dtype=np.float64)
+        for row in range(grid.shape[0]):
+            for col in range(grid.shape[1]):
+                corners = [
+                    grid.transform * (col, row),
+                    grid.transform * (col + 1, row),
+                    grid.transform * (col + 1, row + 1),
+                    grid.transform * (col, row + 1),
+                ]
+                lon, lat = zip(*(transformer.transform(x, y) for x, y in corners))
+                area, _ = geod.polygon_area_perimeter(lon, lat)
+                areas[row, col] = abs(area)
+    else:
+        raise ValueError("Raster CRS is required for geographic area calculation.")
+
+    aoi_area_m2 = float(areas[valid].sum())
+    changed_area_m2 = float(areas[changed].sum())
+    return {
+        "aoi_area_m2": aoi_area_m2,
+        "changed_area_m2": changed_area_m2,
+        "changed_area_ha": changed_area_m2 / 10_000.0,
+        "changed_percentage": changed_area_m2 / aoi_area_m2 * 100 if aoi_area_m2 else 0.0,
+    }
 
 
 @dataclass
@@ -81,6 +205,12 @@ class RetrievedPair:
     warnings: list[str] = field(default_factory=list)
     aoi_bbox: list[float] = field(default_factory=list)
     has_nir: bool = False
+    grid: RasterGrid | None = None
+    before_valid_mask: np.ndarray | None = None
+    after_valid_mask: np.ndarray | None = None
+    before_quality: dict[str, Any] = field(default_factory=dict)
+    after_quality: dict[str, Any] = field(default_factory=dict)
+    bands_used: list[str] = field(default_factory=list)
 
     def provenance(self) -> dict[str, Any]:
         return {
@@ -92,10 +222,14 @@ class RetrievedPair:
             "processing": [
                 "Common AOI clip",
                 "Sentinel-2 L2A surface reflectance",
-                "Per-band percentile stretch to RGB",
-                "Grid alignment for T1/T2",
+                "B04 target grid selection",
+                "Explicit per-band resampling to the common T1 grid",
+                "RGB display stretch after common-grid processing",
             ],
             "has_nir": self.has_nir,
+            "bands_used": self.bands_used,
+            "grid": self.grid.as_dict() if self.grid else None,
+            "quality": {"before": self.before_quality, "after": self.after_quality},
         }
 
 
@@ -361,7 +495,7 @@ def _asset_href(item: dict, candidates: list[str]) -> str | None:
 def _read_band_window(
     href: str,
     bbox_wgs84: list[float],
-) -> tuple[np.ndarray, Any, Any]:
+) -> tuple[np.ndarray, RasterGrid, np.ndarray, dict[str, Any]]:
     if not RASTERIO_AVAILABLE:
         raise SceneRetrievalError(
             "rasterio is required for satellite retrieval. Install backend requirements."
@@ -371,25 +505,48 @@ def _read_band_window(
     with rasterio.open(href) as src:
         bbox_proj = transform_bounds("EPSG:4326", src.crs, west, south, east, north)
         window = rasterio.windows.from_bounds(*bbox_proj, transform=src.transform)
-        data = src.read(1, window=window, boundless=True, fill_value=0).astype(np.float32)
-        transform = src.window_transform(window)
-        return data, transform, src.crs
+        masked = src.read(1, window=window, boundless=True, masked=True)
+        valid = (~np.ma.getmaskarray(masked)) & np.isfinite(masked.data)
+        data = masked.filled(np.nan).astype(np.float32)
+        grid = RasterGrid(
+            shape=data.shape,
+            transform=src.window_transform(window),
+            crs=src.crs,
+        )
+        valid_fraction = float(np.count_nonzero(valid) / valid.size) if valid.size else 0.0
+        return data, grid, valid, {
+            "source_dtype": src.dtypes[0],
+            "declared_nodata": src.nodata,
+            "source_valid_pixel_fraction": valid_fraction,
+            "source_nodata_fraction": 1.0 - valid_fraction,
+        }
+
+
+def _quality_from_valid_mask(valid_mask: np.ndarray, *, band_details: dict[str, Any]) -> dict[str, Any]:
+    valid_fraction = float(np.count_nonzero(valid_mask) / valid_mask.size) if valid_mask.size else 0.0
+    return {
+        "valid_pixel_fraction": valid_fraction,
+        "nodata_fraction": 1.0 - valid_fraction,
+        "band_details": band_details,
+    }
 
 
 def _load_scene_bands(
     item: dict,
     bbox_wgs84: list[float],
-) -> tuple[dict[str, np.ndarray], Any, Any]:
-    band_names = ["B04", "B03", "B02", "B08"]
-    bands: dict[str, np.ndarray] = {}
-    ref_transform = None
-    ref_crs = None
+) -> tuple[dict[str, np.ndarray], RasterGrid, np.ndarray, dict[str, Any]]:
+    # B02/B03/B04/B08 are Sentinel-2 10 m bands. B11/B12 are 20 m bands and
+    # are resampled explicitly to the B04 target grid when present.
+    band_names = ["B04", "B03", "B02", "B08", "B11", "B12"]
+    source_bands: dict[str, tuple[np.ndarray, RasterGrid, np.ndarray, dict[str, Any]]] = {}
 
     aliases = {
         "B04": ["red", "B04", "b04"],
         "B03": ["green", "B03", "b03"],
         "B02": ["blue", "B02", "b02"],
         "B08": ["nir", "B08", "b08", "nir08"],
+        "B11": ["swir16", "B11", "b11"],
+        "B12": ["swir22", "B12", "b12"],
     }
     for band in band_names:
         href = _asset_href(item, aliases.get(band, [band]))
@@ -397,13 +554,9 @@ def _load_scene_bands(
         if not href:
             continue
 
-        data, transform, crs = _read_band_window(href, bbox_wgs84)
-        bands[band] = data
-        if ref_transform is None:
-            ref_transform = transform
-            ref_crs = crs
+        source_bands[band] = _read_band_window(href, bbox_wgs84)
 
-    if not {"B02", "B03", "B04"}.issubset(bands.keys()):
+    if not {"B02", "B03", "B04"}.issubset(source_bands.keys()):
         visual_href = _asset_href(item, ["visual", "rendered_preview", "thumbnail"])
         if visual_href:
             with rasterio.open(visual_href) as src:
@@ -412,19 +565,62 @@ def _load_scene_bands(
                 )
                 window = rasterio.windows.from_bounds(*bbox_proj, transform=src.transform)
                 if src.count >= 3:
-                    rgb = src.read([1, 2, 3], window=window, boundless=True, fill_value=0)
-                    bands["B04"] = rgb[0].astype(np.float32)
-                    bands["B03"] = rgb[1].astype(np.float32)
-                    bands["B02"] = rgb[2].astype(np.float32)
-                    ref_transform = src.window_transform(window)
-                    ref_crs = src.crs
+                    rgb = src.read([1, 2, 3], window=window, boundless=True, masked=True)
+                    grid = RasterGrid(
+                        shape=rgb.shape[1:],
+                        transform=src.window_transform(window),
+                        crs=src.crs,
+                    )
+                    for index, band in enumerate(("B04", "B03", "B02")):
+                        channel = rgb[index]
+                        source_bands[band] = (
+                            channel.filled(np.nan).astype(np.float32),
+                            grid,
+                            (~np.ma.getmaskarray(channel)) & np.isfinite(channel.data),
+                            {
+                                "source_dtype": src.dtypes[index],
+                                "declared_nodata": src.nodata,
+                                "source_valid_pixel_fraction": float(
+                                    np.count_nonzero(~np.ma.getmaskarray(channel)) / channel.size
+                                ) if channel.size else 0.0,
+                                "source_nodata_fraction": float(
+                                    np.count_nonzero(np.ma.getmaskarray(channel)) / channel.size
+                                ) if channel.size else 0.0,
+                            },
+                        )
 
-    if not {"B02", "B03", "B04"}.issubset(bands.keys()):
+    if not {"B02", "B03", "B04"}.issubset(source_bands.keys()):
         raise SceneRetrievalError(
             f"Scene {item.get('id')} is missing RGB assets for the selected AOI."
         )
 
-    return bands, ref_transform, ref_crs
+    target_grid = source_bands["B04"][1]
+    bands: dict[str, np.ndarray] = {}
+    masks: dict[str, np.ndarray] = {}
+    band_details: dict[str, Any] = {}
+    for band, (data, source_grid, valid, source_quality) in source_bands.items():
+        bands[band] = _reproject_to_grid(
+            data,
+            source_grid,
+            target_grid,
+            resampling=Resampling.bilinear,
+        )
+        masks[band] = _reproject_to_grid(
+            valid.astype(np.float32),
+            source_grid,
+            target_grid,
+            resampling=Resampling.nearest,
+        ) > 0.5
+        band_details[band] = {
+            "source_grid": source_grid.as_dict(),
+            "target_resolution": list(target_grid.resolution),
+            **source_quality,
+            "analysis_dtype": str(bands[band].dtype),
+            "resampled_to_target_grid": not grids_compatible(source_grid, target_grid),
+        }
+
+    rgb_valid = masks["B02"] & masks["B03"] & masks["B04"]
+    return bands, target_grid, rgb_valid, _quality_from_valid_mask(rgb_valid, band_details=band_details)
 
 
 def _align_band_to_reference(
@@ -437,30 +633,15 @@ def _align_band_to_reference(
 ) -> np.ndarray:
     if not RASTERIO_AVAILABLE:
         return band
-
-    # Equal dimensions alone do not establish co-registration: transforms or
-    # CRSs can differ while an array has the same shape as the reference grid.
-    if (
-        band.shape == ref_shape
-        and src_transform == ref_transform
-        and src_crs == ref_crs
-    ):
-        return band
-
-    dst = np.zeros(ref_shape, dtype=np.float32)
-    reproject(
-        source=band,
-        destination=dst,
-        src_transform=src_transform,
-        src_crs=src_crs,
-        dst_transform=ref_transform,
-        dst_crs=ref_crs,
+    return _reproject_to_grid(
+        band,
+        RasterGrid(shape=band.shape, transform=src_transform, crs=src_crs),
+        RasterGrid(shape=ref_shape, transform=ref_transform, crs=ref_crs),
         resampling=Resampling.bilinear,
     )
-    return dst
 
 
-def _bands_to_bgr(bands: dict[str, np.ndarray]) -> np.ndarray:
+def _bands_to_bgr(bands: dict[str, np.ndarray], grid: RasterGrid) -> tuple[np.ndarray, RasterGrid]:
     red = bands["B04"]
     green = bands["B03"]
     blue = bands["B02"]
@@ -473,24 +654,35 @@ def _bands_to_bgr(bands: dict[str, np.ndarray]) -> np.ndarray:
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     h, w = bgr.shape[:2]
     scale = min(1.0, MAX_OUTPUT_PX / max(h, w))
+    output_grid = grid
     if scale < 1.0:
+        output_shape = (int(h * scale), int(w * scale))
         bgr = cv2.resize(
             bgr,
-            (int(w * scale), int(h * scale)),
+            (output_shape[1], output_shape[0]),
             interpolation=cv2.INTER_AREA,
         )
         for key in list(bands.keys()):
             bh, bw = bands[key].shape[:2]
             bands[key] = cv2.resize(
                 bands[key],
-                (int(bw * scale), int(bh * scale)),
+                (output_shape[1], output_shape[0]),
                 interpolation=cv2.INTER_AREA,
             )
-    return bgr
+        output_grid = grid.scaled_to(output_shape)
+    return bgr, output_grid
 
 
 def _scene_metadata(item: dict) -> SceneMetadata:
     dt = _parse_scene_datetime(item)
+    props = item.get("properties", {})
+
+    def optional_percent(*keys: str) -> float | None:
+        for key in keys:
+            if props.get(key) is not None:
+                return round(float(props[key]), 2)
+        return None
+
     return SceneMetadata(
         date=dt.strftime("%Y-%m-%d"),
         datetime_utc=dt.strftime("%Y-%m-%d %H:%M UTC"),
@@ -500,6 +692,8 @@ def _scene_metadata(item: dict) -> SceneMetadata:
         stac_id=item.get("id", ""),
         mgrs_tile=_scene_mgrs(item),
         platform="Sentinel-2",
+        cloud_shadow_percent=optional_percent("s2:cloud_shadow_percentage", "eo:cloud_shadow_cover"),
+        metadata_nodata_percent=optional_percent("s2:nodata_pixel_percentage"),
     )
 
 
@@ -550,23 +744,43 @@ def retrieve_temporal_pair(
         hist_dt,
     )
 
-    before_bands, before_transform, before_crs = _load_scene_bands(historical, aoi)
-    after_bands_raw, after_transform, after_crs = _load_scene_bands(latest, aoi)
+    before_bands, before_grid, before_valid, before_quality = _load_scene_bands(historical, aoi)
+    after_bands_raw, after_grid, after_valid, after_quality = _load_scene_bands(latest, aoi)
 
-    ref_shape = before_bands["B04"].shape
+    ref_shape = before_grid.shape
     aligned_after: dict[str, np.ndarray] = {}
     for band, arr in after_bands_raw.items():
         aligned_after[band] = _align_band_to_reference(
             arr,
-            after_transform,
-            after_crs,
+            after_grid.transform,
+            after_grid.crs,
             ref_shape,
-            before_transform,
-            before_crs,
+            before_grid.transform,
+            before_grid.crs,
         )
+    aligned_after_valid = _reproject_to_grid(
+        after_valid.astype(np.float32),
+        after_grid,
+        before_grid,
+        resampling=Resampling.nearest,
+    ) > 0.5
 
-    before_bgr = _bands_to_bgr(before_bands)
-    after_bgr = _bands_to_bgr(aligned_after)
+    before_bgr, analysis_grid = _bands_to_bgr(before_bands, before_grid)
+    after_bgr, after_analysis_grid = _bands_to_bgr(aligned_after, before_grid)
+    if not grids_compatible(analysis_grid, after_analysis_grid):
+        raise SceneRetrievalError("T1/T2 display grids diverged during common-grid processing.")
+    before_valid = cv2.resize(
+        before_valid.astype(np.uint8),
+        (analysis_grid.shape[1], analysis_grid.shape[0]),
+        interpolation=cv2.INTER_NEAREST,
+    ).astype(bool)
+    aligned_after_valid = cv2.resize(
+        aligned_after_valid.astype(np.uint8),
+        (analysis_grid.shape[1], analysis_grid.shape[0]),
+        interpolation=cv2.INTER_NEAREST,
+    ).astype(bool)
+    before_quality = _quality_from_valid_mask(before_valid, band_details=before_quality["band_details"])
+    after_quality = _quality_from_valid_mask(aligned_after_valid, band_details=after_quality["band_details"])
     has_nir = "B08" in before_bands and "B08" in aligned_after
 
     warnings = hist_warnings + latest_warnings
@@ -577,6 +791,25 @@ def retrieve_temporal_pair(
             "grids were reprojected to a common AOI."
         )
 
+    for label, quality in (("T1", before_quality), ("T2", after_quality)):
+        valid_fraction = quality["valid_pixel_fraction"]
+        if valid_fraction < MIN_VALID_PIXEL_FRACTION:
+            raise SceneRetrievalError(
+                f"{label} has only {valid_fraction:.1%} valid RGB pixels in the AOI; analysis was rejected."
+            )
+        if valid_fraction < WARN_VALID_PIXEL_FRACTION:
+            warnings.append(
+                f"{label} valid RGB-pixel fraction is {valid_fraction:.1%}; NoData covers {quality['nodata_fraction']:.1%} of the AOI."
+            )
+
+    before_meta = _scene_metadata(historical)
+    after_meta = _scene_metadata(latest)
+    for label, metadata in (("T1", before_meta), ("T2", after_meta)):
+        if metadata.cloud_shadow_percent is not None:
+            warnings.append(f"{label} scene metadata reports {metadata.cloud_shadow_percent:.1f}% cloud/shadow coverage.")
+        if metadata.metadata_nodata_percent is not None:
+            warnings.append(f"{label} scene metadata reports {metadata.metadata_nodata_percent:.1f}% NoData pixels.")
+
     return RetrievedPair(
         before_bgr=before_bgr,
         after_bgr=after_bgr,
@@ -586,9 +819,15 @@ def retrieve_temporal_pair(
             **loc,
             "aoi_radius_km": aoi_radius_km,
         },
-        before_meta=_scene_metadata(historical),
-        after_meta=_scene_metadata(latest),
+        before_meta=before_meta,
+        after_meta=after_meta,
         warnings=warnings,
         aoi_bbox=aoi,
         has_nir=has_nir,
+        grid=analysis_grid,
+        before_valid_mask=before_valid,
+        after_valid_mask=aligned_after_valid,
+        before_quality=before_quality,
+        after_quality=after_quality,
+        bands_used=sorted(set(before_bands) & set(aligned_after)),
     )

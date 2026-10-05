@@ -45,3 +45,5 @@ Report more than one aggregate score: include precision/recall, class-wise value
 ## Presenting current output
 
 Call the current percentage **visual difference** or **detected visual-change area**, not accuracy. The backend's own response disclaimer requires ground-truth masks plus IoU, precision, recall, and F1 for defensible accuracy claims.
+
+For catalog results, physical changed area is a grid-derived measurement over valid pixels, not an accuracy metric. It remains vulnerable to false visual change from clouds, shadows, seasonal surface variation, and residual registration error; it must not be interpreted as validated land-cover-change area until evaluated against appropriate ground truth.

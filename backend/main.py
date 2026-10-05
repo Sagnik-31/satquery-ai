@@ -17,7 +17,9 @@ from pydantic import BaseModel, Field
 
 from satellite_service import (
     RetrievedPair,
+    RasterGrid,
     SceneRetrievalError,
+    calculate_geospatial_areas,
     get_cached_pair,
     pair_cache_key,
     retrieve_temporal_pair,
@@ -599,6 +601,13 @@ def compute_ndwi(green: np.ndarray, nir: np.ndarray) -> np.ndarray:
     )
 
 
+def compute_ndbi(swir: np.ndarray, nir: np.ndarray) -> np.ndarray:
+    """Normalized Difference Built-up Index; requires aligned SWIR and NIR."""
+    return (swir.astype(np.float32) - nir.astype(np.float32)) / (
+        swir.astype(np.float32) + nir.astype(np.float32) + 1e-6
+    )
+
+
 def build_spectral_semantic(
     before_bands: dict[str, np.ndarray],
     after_bands: dict[str, np.ndarray],
@@ -1006,6 +1015,8 @@ def run_change_analysis(
     min_area: int = 3000,
     spectral: dict[str, Any] | None = None,
     geospatial_aligned: bool = False,
+    geospatial_grid: RasterGrid | None = None,
+    valid_mask: np.ndarray | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     before, after = resize_to_match(before, after)
@@ -1085,6 +1096,11 @@ def run_change_analysis(
     total_pixels = mask.size
     changed_pixels = int(np.count_nonzero(mask))
     change_pct = changed_pixels / total_pixels * 100 if total_pixels else 0.0
+    geospatial = None
+    if geospatial_grid is not None:
+        if valid_mask is None:
+            valid_mask = np.ones(mask.shape, dtype=bool)
+        geospatial = calculate_geospatial_areas(mask, valid_mask, geospatial_grid)
 
     largest_region_pct = 0.0
 
@@ -1333,6 +1349,7 @@ def run_change_analysis(
             ),
         },
         "timing_ms": round(elapsed_ms, 1),
+        "geospatial": geospatial,
         "disclaimer": (
             "Visual difference percentage is not model accuracy. "
             "Quantitative accuracy requires ground-truth change masks "
@@ -1432,6 +1449,12 @@ def _analysis_from_pair(pair: RetrievedPair, query: str, min_area: int, pair_id:
         min_area,
         spectral=spectral,
         geospatial_aligned=True,
+        geospatial_grid=pair.grid,
+        valid_mask=(
+            pair.before_valid_mask & pair.after_valid_mask
+            if pair.before_valid_mask is not None and pair.after_valid_mask is not None
+            else None
+        ),
     )
 
     result["pair_id"] = pair_id
@@ -1460,6 +1483,11 @@ def _analysis_from_pair(pair: RetrievedPair, query: str, min_area: int, pair_id:
         "label": "Latest available acquisition",
     }
     result["provenance"] = pair.provenance()
+    result["quality"] = {
+        "before": {"cloud_percent": pair.before_meta.cloud_cover, **pair.before_quality},
+        "after": {"cloud_percent": pair.after_meta.cloud_cover, **pair.after_quality},
+        "registration_status": "common_grid_verified",
+    }
     result["general_change"] = {
         "changed_area_percent": next(
             (m["value"] for m in result.get("metrics", []) if "Visual" in m.get("label", "")),
@@ -1522,4 +1550,3 @@ async def temporal_analysis(request: TemporalAnalysisRequest):
             status_code=500,
             detail=f"Analysis failed: {type(exc).__name__}: {exc}",
         ) from exc
-
