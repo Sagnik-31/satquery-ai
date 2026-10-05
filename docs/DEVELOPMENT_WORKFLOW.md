@@ -6,6 +6,16 @@ Frontend requirements are declared in `package.json` (Node `>=22.13.0`). Run `np
 
 For the backend, use the commands in `README_HACKATHON.md`: create `backend/.venv`, install `backend/requirements.txt`, then run Uvicorn from `backend` on port 8000. `start_backend.sh` performs the same setup/run sequence. The first optional SegFormer query can download its checkpoint; location/date retrieval accesses remote STAC/COG services and may be slow.
 
+## Tests
+
+Run the offline backend regression suite from the repository root:
+
+```bash
+pytest backend/tests -q
+```
+
+The suite uses synthetic imagery and mocked retrieval failures. It must not contact Nominatim, Element84/STAC, remote COG assets, or download/load the optional ADE20K SegFormer model.
+
 ## Change discipline
 
 1. Read `AGENTS.md`, the relevant source module, and these docs before changing behavior.

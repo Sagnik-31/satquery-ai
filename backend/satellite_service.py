@@ -438,7 +438,13 @@ def _align_band_to_reference(
     if not RASTERIO_AVAILABLE:
         return band
 
-    if band.shape == ref_shape:
+    # Equal dimensions alone do not establish co-registration: transforms or
+    # CRSs can differ while an array has the same shape as the reference grid.
+    if (
+        band.shape == ref_shape
+        and src_transform == ref_transform
+        and src_crs == ref_crs
+    ):
         return band
 
     dst = np.zeros(ref_shape, dtype=np.float32)
