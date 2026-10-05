@@ -37,6 +37,10 @@ For semantic change, predict class labels only where change is present, or model
 
 Every run should store: Git revision, dataset/label version and license, split manifest, configuration, random seed, environment/dependency versions, checkpoint hash, training logs, metrics, per-scene predictions, and failure analysis. A claim of reproduction requires matching the cited paper's task, data, preprocessing, split, and metrics closely enough to support the claim.
 
+## Classical baseline evaluation
+
+Before training, SatQuery evaluates the existing `run_change_analysis` detector through the LEVIR-CD adapter on the official `test` split. The evaluator invokes the production detector rather than duplicating its ORB registration, LAB/edge difference, thresholding, morphology, and component filtering. It aggregates TP/TN/FP/FN and reports precision, recall, F1, and IoU. Results are written outside Git only after a real labeled dataset is supplied; no placeholder metric values are committed.
+
 ## Research questions
 
 - Does a learned bi-temporal model materially improve IoU/F1 over the current classical baseline on the same held-out scenes?

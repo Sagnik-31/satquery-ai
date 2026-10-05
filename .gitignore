@@ -8,3 +8,5 @@ __pycache__/
 .DS_Store
 .pytest_cache/
 .vscode/
+experiments/baseline/results/*.json
+experiments/baseline/results/artifacts/

@@ -16,6 +16,14 @@ pytest backend/tests -q
 
 The suite uses synthetic imagery and mocked retrieval failures. It must not contact Nominatim, Element84/STAC, remote COG assets, or download/load the optional ADE20K SegFormer model.
 
+To evaluate the production classical baseline against a real LEVIR-CD test split kept outside Git, run:
+
+```bash
+python3 -m ml.evaluation.evaluate_baseline --dataset-root /absolute/path/to/LEVIR-CD --split test
+```
+
+This command is intentionally separate from the offline test suite. It writes measured JSON and limited error-analysis artifacts under `experiments/baseline/results/`, which are ignored by Git.
+
 ## Change discipline
 
 1. Read `AGENTS.md`, the relevant source module, and these docs before changing behavior.

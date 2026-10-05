@@ -42,6 +42,10 @@ Report more than one aggregate score: include precision/recall, class-wise value
 5. Save qualitative true-positive, false-positive, and false-negative examples with scene metadata.
 6. For production-oriented confidence, measure calibration separately from segmentation quality.
 
+## Current reproducible baseline
+
+The initial evaluator supports the official LEVIR-CD `test` layout (`test/A`, `test/B`, `test/label`) and calls the production classical detector. It interprets nonzero label pixels as change and aggregates global TP/TN/FP/FN into precision, recall, F1, and IoU. Empty prediction and empty ground truth are defined as an exact unchanged prediction; all four overlap metrics are then 1.0. Results are not available until the real dataset is supplied locally, and no synthetic fixture is treated as scientific evidence.
+
 ## Presenting current output
 
 Call the current percentage **visual difference** or **detected visual-change area**, not accuracy. The backend's own response disclaimer requires ground-truth masks plus IoU, precision, recall, and F1 for defensible accuracy claims.

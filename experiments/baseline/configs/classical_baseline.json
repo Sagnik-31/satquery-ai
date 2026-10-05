@@ -1,0 +1,8 @@
+{
+  "dataset": "LEVIR-CD",
+  "split": "test",
+  "method": "classical_orb_lab_edge_otsu_morphology_connected_components",
+  "query": "What changed?",
+  "min_area": 3000,
+  "max_error_artifacts": 8
+}
