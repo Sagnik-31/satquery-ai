@@ -42,9 +42,13 @@ Report more than one aggregate score: include precision/recall, class-wise value
 5. Save qualitative true-positive, false-positive, and false-negative examples with scene metadata.
 6. For production-oriented confidence, measure calibration separately from segmentation quality.
 
-## Current reproducible baseline
+## LEVIR-CD split protection and current reproducible baseline
 
-The initial evaluator supports the official LEVIR-CD `test` layout (`test/A`, `test/B`, `test/label`) and calls the production classical detector. It interprets nonzero label pixels as change and aggregates global TP/TN/FP/FN into precision, recall, F1, and IoU. Empty prediction and empty ground truth are defined as an exact unchanged prediction; all four overlap metrics are then 1.0. Results are not available until the real dataset is supplied locally, and no synthetic fixture is treated as scientific evidence.
+The local official LEVIR-CD structure contains 445 train, 64 validation, and 128 test paired RGB scenes. The test split is locked. It must not be used for learned-model training, normalization, debugging, threshold tuning, architecture selection, or validation.
+
+The classical evaluator supports the official LEVIR-CD `test` layout (`test/A`, `test/B`, `test/label`) and calls the production classical detector. It interprets nonzero label pixels as change and aggregates global TP/TN/FP/FN into precision, recall, F1, and IoU. The measured locked classical result is precision 0.1238636852, recall 0.1067324675, F1 0.1146617287, and IoU 0.0608175893. It is a baseline comparison, not a tuning signal.
+
+The learned v1 foundation reads only train/val and has not been trained or evaluated. It is RGB LEVIR-CD only, not a validated Sentinel-2 model. Future Sentinel-2 experiments must establish their own data protocol with `[B02, B03, B04, B08, B11, B12]` in that fixed band order.
 
 ## Presenting current output
 

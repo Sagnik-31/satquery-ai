@@ -10,3 +10,10 @@ __pycache__/
 .vscode/
 experiments/baseline/results/*.json
 experiments/baseline/results/artifacts/
+experiments/siamese_unet_levir_v1/runs/
+experiments/siamese_unet_levir_v1/checkpoints/
+experiments/siamese_unet_levir_v1/logs/
+experiments/siamese_unet_levir_v1/metrics/
+experiments/siamese_unet_levir_v1/manifests/
+experiments/siamese_unet_levir_v1/normalization/
+experiments/siamese_unet_levir_v1/validation_artifacts/

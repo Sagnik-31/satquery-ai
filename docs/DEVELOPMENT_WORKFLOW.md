@@ -24,6 +24,8 @@ python3 -m ml.evaluation.evaluate_baseline --dataset-root /absolute/path/to/LEVI
 
 This command is intentionally separate from the offline test suite. It writes measured JSON and limited error-analysis artifacts under `experiments/baseline/results/`, which are ignored by Git.
 
+The learned LEVIR-CD Siamese U-Net foundation is train/validation-only. Its commands and split-protection policy are documented in `experiments/siamese_unet_levir_v1/README.md`. Do not pass the locked `test/` split to learned-model development; its final evaluation happens only after the model protocol is frozen.
+
 ## Change discipline
 
 1. Read `AGENTS.md`, the relevant source module, and these docs before changing behavior.

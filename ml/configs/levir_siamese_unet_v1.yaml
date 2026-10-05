@@ -1,0 +1,28 @@
+# Conservative starting point for the first learned LEVIR-CD baseline.
+# These defaults are not claimed to be optimal; tune only on official validation.
+training:
+  seed: 20261005
+  device: auto
+  patch_size: 256
+  batch_size: 4
+  epochs: 20
+  num_workers: 0
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  optimizer: adamw
+  scheduler: cosine
+  scheduler_t_max: 20
+  bce_weight: 0.5
+  dice_weight: 0.5
+  selection_metric: iou
+
+model:
+  input_channels: 3
+  base_channels: 24
+
+threshold:
+  # Fixed avoids an unrecorded threshold search. If validation_iou_search is
+  # intentionally enabled later, its candidate list is evaluated on val only.
+  policy: fixed
+  value: 0.5
+  candidates: [0.5]
