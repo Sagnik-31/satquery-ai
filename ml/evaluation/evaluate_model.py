@@ -43,21 +43,26 @@ def sliding_window_logits(
     patch_size: int,
     stride: int,
     device: torch.device,
+    tile_batch_size: int = 8,
 ) -> torch.Tensor:
     """Average overlapping patch logits into one full-resolution logit map."""
     if t1.ndim != 3 or t2.ndim != 3 or t1.shape != t2.shape:
         raise ValueError("T1 and T2 must be matching unbatched [C, H, W] tensors.")
     if stride <= 0 or stride > patch_size:
         raise ValueError("stride must be positive and no larger than patch_size.")
+    if tile_batch_size <= 0:
+        raise ValueError("tile_batch_size must be positive.")
     _, height, width = t1.shape
     summed = torch.zeros((height, width), dtype=torch.float32)
     counts = torch.zeros((height, width), dtype=torch.float32)
-    for top in _window_starts(height, patch_size, stride):
-        for left in _window_starts(width, patch_size, stride):
-            patch_t1 = t1[:, top : top + patch_size, left : left + patch_size].unsqueeze(0).to(device)
-            patch_t2 = t2[:, top : top + patch_size, left : left + patch_size].unsqueeze(0).to(device)
-            logits = model(patch_t1, patch_t2).squeeze(0).squeeze(0).detach().cpu()
-            summed[top : top + patch_size, left : left + patch_size] += logits
+    windows = [(top, left) for top in _window_starts(height, patch_size, stride) for left in _window_starts(width, patch_size, stride)]
+    for offset in range(0, len(windows), tile_batch_size):
+        batch_windows = windows[offset : offset + tile_batch_size]
+        patches_t1 = torch.stack([t1[:, top : top + patch_size, left : left + patch_size] for top, left in batch_windows]).to(device)
+        patches_t2 = torch.stack([t2[:, top : top + patch_size, left : left + patch_size] for top, left in batch_windows]).to(device)
+        logits = model(patches_t1, patches_t2).squeeze(1).detach().cpu()
+        for (top, left), tile_logits in zip(batch_windows, logits):
+            summed[top : top + patch_size, left : left + patch_size] += tile_logits
             counts[top : top + patch_size, left : left + patch_size] += 1
     if torch.any(counts == 0):
         raise RuntimeError("Sliding-window coverage failed for at least one validation pixel.")
@@ -103,6 +108,7 @@ def evaluate_validation_model(
     stride: int,
     threshold: ThresholdConfig,
     artifact_dir: Path | None = None,
+    tile_batch_size: int = 8,
 ) -> dict[str, Any]:
     """Evaluate a model over full validation scenes and select only on validation."""
     if dataset.split != "val":
@@ -119,7 +125,9 @@ def evaluate_validation_model(
         example = dataset[index]
         t1, t2, target = example["t1"], example["t2"], example["mask"]
         assert isinstance(t1, torch.Tensor) and isinstance(t2, torch.Tensor) and isinstance(target, torch.Tensor)
-        logits = sliding_window_logits(model, t1, t2, patch_size=patch_size, stride=stride, device=device)
+        logits = sliding_window_logits(
+            model, t1, t2, patch_size=patch_size, stride=stride, device=device, tile_batch_size=tile_batch_size
+        )
         probabilities = torch.sigmoid(logits).numpy()
         truth = target.squeeze(0).numpy().astype(bool)
         by_threshold: dict[float, BinaryConfusion] = {}
@@ -189,6 +197,7 @@ def main() -> int:
         stride=config.patch_size // 2,
         threshold=frozen_threshold_from_checkpoint(payload),
         artifact_dir=args.artifact_dir,
+        tile_batch_size=config.validation_tile_batch_size,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")

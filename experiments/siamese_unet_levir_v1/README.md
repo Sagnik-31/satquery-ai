@@ -86,6 +86,42 @@ best-effort reproducible; exact bitwise replay is not guaranteed. Generated
 checkpoints, manifests, logs, metrics, normalization, and validation artifacts
 are ignored by Git.
 
+## Resume safety
+
+New checkpoints save model, optimizer, scheduler, Python/NumPy/Torch RNG, the
+DataLoader shuffle-generator state, training history, and best-validation
+state. A normal resume validates Git revision, configuration hash, channel
+schema, train-derived normalization, dataset fingerprint, and split-manifest
+hash; it continues at epoch `N + 1` and never overwrites existing epoch files.
+
+For a future exact stateful resume, use the same run directory and a checkpoint
+created by this resume-capable implementation:
+
+```bash
+python3 -m ml.training.train_change_model \
+  --dataset-root "$HOME/datasets/LEVIR-CD" \
+  --config ml/configs/levir_siamese_unet_v1.yaml \
+  --run-dir experiments/siamese_unet_levir_v1/runs/<same-run> \
+  --resume-from experiments/siamese_unet_levir_v1/runs/<same-run>/checkpoints/epoch_012.pt
+```
+
+The interrupted `controlled_v1_20261005/epoch_011.pt` predates DataLoader
+generator-state support. It cannot be resumed bit-for-bit. If a reviewed
+decision is made to continue that pilot, it must explicitly acknowledge this:
+
+```bash
+python3 -m ml.training.train_change_model \
+  --dataset-root "$HOME/datasets/LEVIR-CD" \
+  --config ml/configs/levir_siamese_unet_v1.yaml \
+  --run-dir experiments/siamese_unet_levir_v1/runs/controlled_v1_20261005 \
+  --resume-from experiments/siamese_unet_levir_v1/runs/controlled_v1_20261005/checkpoints/epoch_011.pt \
+  --allow-nonexact-resume
+```
+
+That command records `resume_exact=false` and the source checkpoint hash. It
+does not make the interrupted pilot equivalent to an uninterrupted 20-epoch
+run.
+
 Future Sentinel-2 work requires a separate dataset and validation protocol.
 Its planned channel order is `[B02, B03, B04, B08, B11, B12]`; this RGB model
 does not validate that schema or sensor domain.

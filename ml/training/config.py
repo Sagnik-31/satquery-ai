@@ -63,6 +63,7 @@ class TrainingConfig:
     optimizer: str = "adamw"
     scheduler: str = "cosine"
     scheduler_t_max: int = 20
+    validation_tile_batch_size: int = 8
     bce_weight: float = 0.5
     dice_weight: float = 0.5
     selection_metric: str = "iou"
@@ -78,6 +79,8 @@ class TrainingConfig:
             raise ValueError("patch_size must be positive and divisible by 16.")
         if self.batch_size <= 0 or self.epochs <= 0 or self.num_workers < 0:
             raise ValueError("batch_size/epochs must be positive and num_workers non-negative.")
+        if self.validation_tile_batch_size <= 0:
+            raise ValueError("validation_tile_batch_size must be positive.")
         if self.learning_rate <= 0 or self.weight_decay < 0:
             raise ValueError("learning_rate must be positive and weight_decay non-negative.")
         if self.optimizer != "adamw" or self.scheduler != "cosine":
@@ -91,7 +94,12 @@ class TrainingConfig:
         return asdict(self)
 
     def fingerprint(self) -> str:
-        serialized = json.dumps(self.as_dict(), sort_keys=True, separators=(",", ":"))
+        identity = self.as_dict()
+        # Tile batch size changes throughput only. It does not change model
+        # weights, tiles, overlap aggregation, thresholding, or metrics, so it
+        # is deliberately excluded from scientific experiment identity.
+        identity.pop("validation_tile_batch_size", None)
+        serialized = json.dumps(identity, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 

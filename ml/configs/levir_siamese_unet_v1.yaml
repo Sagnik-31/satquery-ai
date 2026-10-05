@@ -12,6 +12,7 @@ training:
   optimizer: adamw
   scheduler: cosine
   scheduler_t_max: 20
+  validation_tile_batch_size: 8
   bce_weight: 0.5
   dice_weight: 0.5
   selection_metric: iou

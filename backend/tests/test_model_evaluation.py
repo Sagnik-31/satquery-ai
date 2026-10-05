@@ -62,6 +62,20 @@ def test_sliding_window_averages_overlapping_logits_at_full_image_shape():
     assert logits[0, 0].item() == pytest.approx(-10.0)
 
 
+def test_batched_tiles_match_single_tile_aggregation():
+    t1 = torch.zeros(3, 32, 32)
+    t2 = t1.clone()
+    t2[:, 8:24, 8:24] = 1.0
+    single = sliding_window_logits(
+        DifferenceLogitModel(), t1, t2, patch_size=16, stride=8, device=torch.device("cpu"), tile_batch_size=1
+    )
+    batched = sliding_window_logits(
+        DifferenceLogitModel(), t1, t2, patch_size=16, stride=8, device=torch.device("cpu"), tile_batch_size=4
+    )
+    assert batched.shape == single.shape == (32, 32)
+    assert torch.equal(batched, single)
+
+
 def test_sliding_window_reconstructs_1024_with_256_tiles_and_128_stride():
     image = torch.zeros(3, 1024, 1024)
     logits = sliding_window_logits(
@@ -154,6 +168,10 @@ def test_saved_checkpoint_contains_frozen_metadata_and_sha256_sidecar(tmp_path):
             "channel_schema": {"t1": 3, "t2": 3, "output_logits": 1},
             "config_sha256": config.fingerprint(),
         },
+        dataloader_generator_state=torch.Generator().manual_seed(123).get_state(),
+        history=[{"epoch": 1, "validation": {"iou": 0.2}}],
+        best_validation_iou=0.2,
+        best_checkpoint_epoch=1,
     )
     payload = load_checkpoint(destination, device=torch.device("cpu"))
     assert payload["selected_validation_threshold"] == 0.6

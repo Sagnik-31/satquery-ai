@@ -27,7 +27,13 @@ from ml.datasets.levir_cd import (
 from ml.datasets.paired_transforms import PairedSpatialTransform
 from ml.evaluation.evaluate_model import evaluate_validation_model
 from ml.models.siamese_unet import SiameseUNet
-from ml.training.checkpointing import save_checkpoint
+from ml.training.checkpointing import (
+    checkpoint_sha256,
+    ensure_new_epoch_checkpoint,
+    load_checkpoint,
+    restore_training_state,
+    save_checkpoint,
+)
 from ml.training.config import TrainingConfig, load_training_config
 from ml.training.reproducibility import runtime_metadata, seed_everything, select_device
 
@@ -90,6 +96,50 @@ def _write_metadata(
     return manifest_hash
 
 
+def _manifest_hash(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _load_history(run_dir: Path) -> list[dict[str, Any]]:
+    path = run_dir / "train_log.json"
+    if not path.is_file():
+        raise ValueError("Cannot non-exactly resume: train_log.json is required to recover prior history.")
+    history = json.loads(path.read_text())
+    if not isinstance(history, list):
+        raise ValueError("Cannot non-exactly resume: train_log.json must contain a JSON list.")
+    return history
+
+
+def validate_resume_identity(
+    payload: dict[str, Any],
+    *,
+    config: TrainingConfig,
+    normalization: dict[str, list[float]],
+    dataset_fingerprint: dict[str, object],
+    split_manifest_sha256: str,
+    git_revision: str,
+) -> None:
+    expected_schema = {"t1": config.model.input_channels, "t2": config.model.input_channels, "output_logits": 1}
+    provenance = payload["provenance"]
+    checks = {
+        "architecture": (payload["architecture"], "SiameseUNet"),
+        "config hash": (payload["config_sha256"], config.fingerprint()),
+        "channel schema": (payload["channel_schema"], expected_schema),
+        "normalization": (payload["normalization"], normalization),
+        "dataset fingerprint": (provenance.get("dataset_fingerprint"), dataset_fingerprint),
+        "split manifest hash": (provenance.get("split_manifest_sha256"), split_manifest_sha256),
+        "Git revision": (provenance.get("git_revision"), git_revision),
+    }
+    for name, (actual, expected) in checks.items():
+        if actual != expected:
+            raise ValueError(f"Resume rejected: checkpoint {name} does not match this experiment identity.")
+
+
+def _append_resume_event(run_dir: Path, event: dict[str, Any]) -> None:
+    with (run_dir / "resume_events.jsonl").open("a") as handle:
+        handle.write(json.dumps(event, sort_keys=True) + "\n")
+
+
 def _checkpoint_provenance(
     config: TrainingConfig,
     *,
@@ -97,6 +147,7 @@ def _checkpoint_provenance(
     dataset_fingerprint: dict[str, object],
     split_manifest_sha256: str,
     train_mask_statistics: dict[str, float | int],
+    resume: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "architecture": "SiameseUNet",
@@ -109,6 +160,7 @@ def _checkpoint_provenance(
         "dataset_fingerprint": dataset_fingerprint,
         "split_manifest_sha256": split_manifest_sha256,
         "train_mask_statistics": train_mask_statistics,
+        "resume": resume,
     }
 
 
@@ -117,6 +169,8 @@ def train(
     dataset_root: str | Path,
     config: TrainingConfig,
     run_dir: str | Path,
+    resume_from: str | Path | None = None,
+    allow_nonexact_resume: bool = False,
 ) -> dict[str, Any]:
     """Run train/validation training. The caller must explicitly start this."""
     seed_everything(config.seed)
@@ -151,30 +205,84 @@ def train(
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.scheduler_t_max)
-    destination = Path(run_dir)
+    destination = Path(run_dir).resolve()
     normalization_dict = normalization.as_dict()
     runtime = runtime_metadata(device)
-    split_manifest_sha256 = _write_metadata(
-        destination,
-        config=config,
-        normalization=normalization_dict,
-        train_mask_statistics=train_mask_statistics,
-        dataset_fingerprint=dataset_fingerprint,
-        runtime=runtime,
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-    )
+    current_git_revision = _git_revision(Path(__file__).resolve().parents[2])
+    resume_metadata: dict[str, Any] = {"resumed": False, "resume_exact": True}
+    if resume_from is None:
+        split_manifest_sha256 = _write_metadata(
+            destination,
+            config=config,
+            normalization=normalization_dict,
+            train_mask_statistics=train_mask_statistics,
+            dataset_fingerprint=dataset_fingerprint,
+            runtime=runtime,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+        )
+    else:
+        source = Path(resume_from).resolve()
+        if source.parent != destination / "checkpoints":
+            raise ValueError("Resume rejected: checkpoint must belong to the requested run directory.")
+        manifest_path = destination / "split_manifest.json"
+        if not manifest_path.is_file():
+            raise ValueError("Resume rejected: existing run split_manifest.json is missing.")
+        split_manifest_sha256 = _manifest_hash(manifest_path)
     provenance = _checkpoint_provenance(
         config,
         runtime=runtime,
         dataset_fingerprint=dataset_fingerprint,
         split_manifest_sha256=split_manifest_sha256,
         train_mask_statistics=train_mask_statistics,
+        resume=resume_metadata,
     )
 
     best_iou = float("-inf")
+    best_checkpoint_epoch: int | None = None
     history: list[dict[str, Any]] = []
-    for epoch in range(1, config.epochs + 1):
+    start_epoch = 1
+    if resume_from is not None:
+        source = Path(resume_from).resolve()
+        payload = load_checkpoint(source, device=device)
+        validate_resume_identity(
+            payload,
+            config=config,
+            normalization=normalization_dict,
+            dataset_fingerprint=dataset_fingerprint,
+            split_manifest_sha256=split_manifest_sha256,
+            git_revision=current_git_revision,
+        )
+        if float(payload["selected_validation_threshold"]) != config.threshold.value:
+            raise ValueError("Resume rejected: checkpoint threshold does not match the configured fixed threshold.")
+        restored = restore_training_state(
+            payload,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            dataloader_generator=generator,
+            allow_nonexact_resume=allow_nonexact_resume,
+        )
+        start_epoch = restored.start_epoch
+        history = restored.history if restored.resume_exact else _load_history(destination)
+        if not restored.resume_exact:
+            if not history or history[-1].get("epoch") != payload["epoch"]:
+                raise ValueError("Cannot non-exactly resume: train log does not end at the source checkpoint epoch.")
+            best_record = max(history, key=lambda record: float(record["validation"]["iou"]))
+            best_iou = float(best_record["validation"]["iou"])
+            best_checkpoint_epoch = int(best_record["epoch"])
+        else:
+            best_iou = restored.best_validation_iou
+            best_checkpoint_epoch = restored.best_checkpoint_epoch
+        resume_metadata = {
+            "resumed": True,
+            "resume_exact": restored.resume_exact,
+            "source_checkpoint_sha256": checkpoint_sha256(source),
+            "source_epoch": int(payload["epoch"]),
+        }
+        provenance["resume"] = resume_metadata
+        _append_resume_event(destination, resume_metadata)
+    for epoch in range(start_epoch, config.epochs + 1):
         train_dataset.set_epoch(epoch)
         model.train()
         total_loss = 0.0
@@ -194,6 +302,7 @@ def train(
             patch_size=config.patch_size,
             stride=config.patch_size // 2,
             threshold=config.threshold,
+            tile_batch_size=config.validation_tile_batch_size,
         )
         scheduler.step()
         record = {
@@ -203,8 +312,9 @@ def train(
             "validation": validation,
         }
         history.append(record)
+        checkpoint_path = ensure_new_epoch_checkpoint(destination / "checkpoints" / f"epoch_{epoch:03d}.pt")
         epoch_checkpoint_hash = save_checkpoint(
-            destination / "checkpoints" / f"epoch_{epoch:03d}.pt",
+            checkpoint_path,
             model=model,
             optimizer=optimizer,
             scheduler=scheduler,
@@ -213,10 +323,15 @@ def train(
             normalization=normalization_dict,
             validation=validation,
             provenance=provenance,
+            dataloader_generator_state=generator.get_state(),
+            history=history,
+            best_validation_iou=max(best_iou, float(validation["iou"])),
+            best_checkpoint_epoch=(epoch if validation["iou"] > best_iou else best_checkpoint_epoch),
         )
         record["checkpoint_sha256"] = epoch_checkpoint_hash
         if validation["iou"] > best_iou:
             best_iou = float(validation["iou"])
+            best_checkpoint_epoch = epoch
             record["best_checkpoint_sha256"] = save_checkpoint(
                 destination / "checkpoints" / "best_val_iou.pt",
                 model=model,
@@ -227,9 +342,13 @@ def train(
                 normalization=normalization_dict,
                 validation=validation,
                 provenance=provenance,
+                dataloader_generator_state=generator.get_state(),
+                history=history,
+                best_validation_iou=best_iou,
+                best_checkpoint_epoch=best_checkpoint_epoch,
             )
         (destination / "train_log.json").write_text(json.dumps(history, indent=2) + "\n")
-    return {"device": str(device), "best_validation_iou": best_iou, "epochs": config.epochs}
+    return {"device": str(device), "best_validation_iou": best_iou, "epochs": config.epochs, "resume": resume_metadata}
 
 
 def main() -> int:
@@ -237,8 +356,16 @@ def main() -> int:
     parser.add_argument("--dataset-root", required=True, help="Local LEVIR-CD root; only train/ and val/ are read.")
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--run-dir", required=True, type=Path, help="Ignored local output directory for one experiment run.")
+    parser.add_argument("--resume-from", type=Path, default=None, help="Checkpoint from this same run directory.")
+    parser.add_argument("--allow-nonexact-resume", action="store_true", help="Acknowledge legacy checkpoints without DataLoader generator state.")
     args = parser.parse_args()
-    result = train(dataset_root=args.dataset_root, config=load_training_config(args.config), run_dir=args.run_dir)
+    result = train(
+        dataset_root=args.dataset_root,
+        config=load_training_config(args.config),
+        run_dir=args.run_dir,
+        resume_from=args.resume_from,
+        allow_nonexact_resume=args.allow_nonexact_resume,
+    )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
