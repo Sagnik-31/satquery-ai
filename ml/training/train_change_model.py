@@ -18,13 +18,18 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
-from ml.datasets.levir_cd import LevirPairedDataset, compute_train_rgb_normalization
+from ml.datasets.levir_cd import (
+    LevirPairedDataset,
+    compute_train_mask_statistics,
+    compute_train_rgb_normalization,
+    fingerprint_development_splits,
+)
 from ml.datasets.paired_transforms import PairedSpatialTransform
 from ml.evaluation.evaluate_model import evaluate_validation_model
 from ml.models.siamese_unet import SiameseUNet
 from ml.training.checkpointing import save_checkpoint
 from ml.training.config import TrainingConfig, load_training_config
-from ml.training.reproducibility import seed_everything, select_device
+from ml.training.reproducibility import runtime_metadata, seed_everything, select_device
 
 
 class SoftDiceLoss(nn.Module):
@@ -59,9 +64,12 @@ def _write_metadata(
     *,
     config: TrainingConfig,
     normalization: dict[str, list[float]],
+    train_mask_statistics: dict[str, float | int],
+    dataset_fingerprint: dict[str, object],
+    runtime: dict[str, object],
     train_dataset: LevirPairedDataset,
     val_dataset: LevirPairedDataset,
-) -> None:
+) -> str:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "config.json").write_text(json.dumps(config.as_dict(), indent=2, sort_keys=True) + "\n")
     (run_dir / "normalization.json").write_text(json.dumps(normalization, indent=2, sort_keys=True) + "\n")
@@ -70,18 +78,37 @@ def _write_metadata(
         "val": [sample.identifier for sample in val_dataset.samples],
         "git_revision": _git_revision(Path(__file__).resolve().parents[2]),
         "test_split_accessed": False,
+        "train_mask_statistics": train_mask_statistics,
+        "dataset_fingerprint": dataset_fingerprint,
+        "dataset": {"identifier": config.dataset.identifier, "version": config.dataset.version},
     }
-    (run_dir / "split_manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    manifest_path = run_dir / "split_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    manifest_hash = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    manifest_path.with_suffix(".json.sha256").write_text(manifest_hash + "\n")
+    (run_dir / "environment.json").write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
+    return manifest_hash
 
 
-def _checkpoint_provenance(config: TrainingConfig) -> dict[str, Any]:
-    config_json = json.dumps(config.as_dict(), sort_keys=True, separators=(",", ":"))
+def _checkpoint_provenance(
+    config: TrainingConfig,
+    *,
+    runtime: dict[str, object],
+    dataset_fingerprint: dict[str, object],
+    split_manifest_sha256: str,
+    train_mask_statistics: dict[str, float | int],
+) -> dict[str, Any]:
     return {
         "architecture": "SiameseUNet",
         "channel_schema": {"t1": config.model.input_channels, "t2": config.model.input_channels, "output_logits": 1},
         "git_revision": _git_revision(Path(__file__).resolve().parents[2]),
-        "config_sha256": hashlib.sha256(config_json.encode("utf-8")).hexdigest(),
+        "config_sha256": config.fingerprint(),
         "selection_metric": "global_validation_iou",
+        "runtime": runtime,
+        "dataset": {"identifier": config.dataset.identifier, "version": config.dataset.version},
+        "dataset_fingerprint": dataset_fingerprint,
+        "split_manifest_sha256": split_manifest_sha256,
+        "train_mask_statistics": train_mask_statistics,
     }
 
 
@@ -95,7 +122,13 @@ def train(
     seed_everything(config.seed)
     device = select_device(config.device)
     normalization = compute_train_rgb_normalization(dataset_root)
-    paired_transform = PairedSpatialTransform(patch_size=config.patch_size)
+    train_mask_statistics = compute_train_mask_statistics(dataset_root)
+    dataset_fingerprint = fingerprint_development_splits(dataset_root)
+    paired_transform = PairedSpatialTransform(
+        patch_size=config.patch_size,
+        positive_crop_fraction=config.sampling.positive_crop_fraction,
+        negative_crop_attempts=config.sampling.negative_crop_attempts,
+    )
     train_dataset = LevirPairedDataset(
         dataset_root,
         split="train",
@@ -120,8 +153,24 @@ def train(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.scheduler_t_max)
     destination = Path(run_dir)
     normalization_dict = normalization.as_dict()
-    provenance = _checkpoint_provenance(config)
-    _write_metadata(destination, config=config, normalization=normalization_dict, train_dataset=train_dataset, val_dataset=val_dataset)
+    runtime = runtime_metadata(device)
+    split_manifest_sha256 = _write_metadata(
+        destination,
+        config=config,
+        normalization=normalization_dict,
+        train_mask_statistics=train_mask_statistics,
+        dataset_fingerprint=dataset_fingerprint,
+        runtime=runtime,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+    )
+    provenance = _checkpoint_provenance(
+        config,
+        runtime=runtime,
+        dataset_fingerprint=dataset_fingerprint,
+        split_manifest_sha256=split_manifest_sha256,
+        train_mask_statistics=train_mask_statistics,
+    )
 
     best_iou = float("-inf")
     history: list[dict[str, Any]] = []
@@ -154,7 +203,7 @@ def train(
             "validation": validation,
         }
         history.append(record)
-        save_checkpoint(
+        epoch_checkpoint_hash = save_checkpoint(
             destination / "checkpoints" / f"epoch_{epoch:03d}.pt",
             model=model,
             optimizer=optimizer,
@@ -165,9 +214,10 @@ def train(
             validation=validation,
             provenance=provenance,
         )
+        record["checkpoint_sha256"] = epoch_checkpoint_hash
         if validation["iou"] > best_iou:
             best_iou = float(validation["iou"])
-            save_checkpoint(
+            record["best_checkpoint_sha256"] = save_checkpoint(
                 destination / "checkpoints" / "best_val_iou.pt",
                 model=model,
                 optimizer=optimizer,

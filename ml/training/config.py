@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -31,6 +33,24 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
+class DatasetConfig:
+    identifier: str = "LEVIR-CD"
+    version: str = "local-official-split-unversioned"
+
+
+@dataclass(frozen=True)
+class CropSamplingConfig:
+    positive_crop_fraction: float = 0.5
+    negative_crop_attempts: int = 32
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.positive_crop_fraction <= 1.0:
+            raise ValueError("sampling.positive_crop_fraction must be between 0 and 1.")
+        if self.negative_crop_attempts <= 0:
+            raise ValueError("sampling.negative_crop_attempts must be positive.")
+
+
+@dataclass(frozen=True)
 class TrainingConfig:
     seed: int = 20261005
     device: str = "auto"
@@ -48,6 +68,8 @@ class TrainingConfig:
     selection_metric: str = "iou"
     threshold: ThresholdConfig = field(default_factory=ThresholdConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
+    dataset: DatasetConfig = field(default_factory=DatasetConfig)
+    sampling: CropSamplingConfig = field(default_factory=CropSamplingConfig)
 
     def __post_init__(self) -> None:
         if self.device not in {"auto", "cpu", "mps", "cuda"}:
@@ -68,6 +90,10 @@ class TrainingConfig:
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    def fingerprint(self) -> str:
+        serialized = json.dumps(self.as_dict(), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
 
 def _section(raw: dict[str, Any], name: str) -> dict[str, Any]:
     value = raw.get(name, {})
@@ -84,5 +110,7 @@ def load_training_config(path: str | Path) -> TrainingConfig:
         raise ValueError("Training configuration must be a YAML mapping.")
     threshold = ThresholdConfig(**_section(raw, "threshold"))
     model = ModelConfig(**_section(raw, "model"))
+    dataset = DatasetConfig(**_section(raw, "dataset"))
+    sampling = CropSamplingConfig(**_section(raw, "sampling"))
     training_values = _section(raw, "training")
-    return TrainingConfig(**training_values, threshold=threshold, model=model)
+    return TrainingConfig(**training_values, threshold=threshold, model=model, dataset=dataset, sampling=sampling)

@@ -38,6 +38,12 @@ saved into the local run directory. Validation reuses that exact metadata.
 Training uses 256×256 paired patches. Horizontal/vertical flips, 90-degree
 rotations, and random crops are sampled once per pair and applied identically
 to T1, T2, and the mask. Photometric augmentation is disabled in v1.
+The train-only crop policy requests a change-containing patch 50% of the time
+when a scene has changed pixels; otherwise it selects a genuinely unchanged
+patch when one exists. This retains negative examples while improving exposure
+to sparse changes. It is a fixed conservative development choice, not an
+optimized hyperparameter. Train-mask positive-pixel prevalence is recorded
+with each run.
 Validation runs full 1024×1024 scenes with 256×256 windows, 128-pixel stride,
 and averaged overlapping logits before thresholding.
 
@@ -73,7 +79,10 @@ python3 -m ml.evaluation.evaluate_model \
 
 Checkpoints contain weights, optimizer and scheduler state, epoch, random
 state, model/channel schema, configuration and hash, Git revision, selected
-validation metrics/threshold, and train-derived normalization. Generated
+validation metrics/threshold, train-derived normalization, a train/validation
+content fingerprint, split-manifest hash, and environment/package snapshot.
+Checkpoint SHA-256 sidecars identify finalized files. MPS execution is
+best-effort reproducible; exact bitwise replay is not guaranteed. Generated
 checkpoints, manifests, logs, metrics, normalization, and validation artifacts
 are ignored by Git.
 

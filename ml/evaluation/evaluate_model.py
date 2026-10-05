@@ -20,7 +20,7 @@ from ml.datasets.levir_cd import LevirPairedDataset, RGBNormalization
 from ml.evaluation.metrics import BinaryConfusion, binary_confusion, merge_confusions, metrics_from_confusion
 from ml.models.siamese_unet import SiameseUNet
 from ml.training.checkpointing import load_checkpoint
-from ml.training.config import ThresholdConfig, load_training_config
+from ml.training.config import ThresholdConfig, TrainingConfig, load_training_config
 from ml.training.reproducibility import select_device
 
 
@@ -66,6 +66,32 @@ def sliding_window_logits(
 
 def _candidate_thresholds(config: ThresholdConfig) -> tuple[float, ...]:
     return (config.value,) if config.policy == "fixed" else tuple(sorted(set(config.candidates)))
+
+
+def verify_checkpoint_configuration(payload: dict[str, Any], config: TrainingConfig) -> None:
+    """Reject config drift before evaluating a frozen checkpoint."""
+    expected_schema = {
+        "t1": config.model.input_channels,
+        "t2": config.model.input_channels,
+        "output_logits": 1,
+    }
+    if payload.get("architecture") != "SiameseUNet":
+        raise ValueError(f"Checkpoint architecture {payload.get('architecture')!r} is not supported.")
+    if payload.get("config_sha256") != config.fingerprint():
+        raise ValueError(
+            "Supplied configuration does not match the frozen checkpoint configuration hash."
+        )
+    if payload.get("channel_schema") != expected_schema:
+        raise ValueError(
+            f"Checkpoint channel schema {payload.get('channel_schema')!r} does not match supplied configuration {expected_schema!r}."
+        )
+    if not 0.0 < float(payload.get("selected_validation_threshold", -1)) < 1.0:
+        raise ValueError("Checkpoint has no valid selected validation threshold.")
+
+
+def frozen_threshold_from_checkpoint(payload: dict[str, Any]) -> ThresholdConfig:
+    """Return the recorded validation threshold without a new threshold search."""
+    return ThresholdConfig(policy="fixed", value=float(payload["selected_validation_threshold"]))
 
 
 def evaluate_validation_model(
@@ -151,6 +177,7 @@ def main() -> int:
     config = load_training_config(args.config)
     device = select_device(config.device)
     payload = load_checkpoint(args.checkpoint, device=device)
+    verify_checkpoint_configuration(payload, config)
     model = SiameseUNet(input_channels=config.model.input_channels, base_channels=config.model.base_channels).to(device)
     model.load_state_dict(payload["model_state_dict"])
     dataset = LevirPairedDataset(args.dataset_root, split="val", normalization=_normalization_from_payload(payload))
@@ -160,7 +187,7 @@ def main() -> int:
         device=device,
         patch_size=config.patch_size,
         stride=config.patch_size // 2,
-        threshold=config.threshold,
+        threshold=frozen_threshold_from_checkpoint(payload),
         artifact_dir=args.artifact_dir,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)

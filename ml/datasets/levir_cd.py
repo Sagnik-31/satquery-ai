@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import hashlib
 from typing import Callable
 
 import cv2
@@ -52,22 +53,33 @@ class LevirCDDataset:
                 "LEVIR-CD split is incomplete. Expected directories: " + ", ".join(missing)
             )
 
-        before_files = sorted(
-            path for path in directories["A"].iterdir() if path.suffix.lower() in IMAGE_SUFFIXES
-        )
+        files_by_directory = {
+            name: {path.name: path for path in directory.iterdir() if path.suffix.lower() in IMAGE_SUFFIXES}
+            for name, directory in directories.items()
+        }
+        before_files = [files_by_directory["A"][name] for name in sorted(files_by_directory["A"])]
         if not before_files:
             raise FileNotFoundError(f"No supported image files found in {directories['A']}")
 
+        names_by_directory = {name: set(files) for name, files in files_by_directory.items()}
+        all_names = set().union(*names_by_directory.values())
+        mismatches = {
+            name: sorted(all_names.difference(names))
+            for name, names in names_by_directory.items()
+            if names != all_names
+        }
+        if mismatches:
+            details = "; ".join(
+                f"{name} missing [{', '.join(names)}]" for name, names in sorted(mismatches.items())
+            )
+            raise FileNotFoundError(
+                f"LEVIR-CD split {self.split!r} has unmatched A/B/label filenames: {details}."
+            )
+
         samples: list[LevirSample] = []
         for before_path in before_files:
-            candidates_b = [directories["B"] / before_path.name]
-            candidates_label = [directories["label"] / before_path.name]
-            after_path = next((path for path in candidates_b if path.is_file()), None)
-            mask_path = next((path for path in candidates_label if path.is_file()), None)
-            if after_path is None or mask_path is None:
-                raise FileNotFoundError(
-                    f"Sample {before_path.name} must exist in A, B, and label for split {self.split}."
-                )
+            after_path = files_by_directory["B"][before_path.name]
+            mask_path = files_by_directory["label"][before_path.name]
             samples.append(LevirSample(before_path.stem, before_path, after_path, mask_path))
         return samples
 
@@ -133,6 +145,41 @@ def compute_train_rgb_normalization(root: str | Path) -> RGBNormalization:
         mean=tuple(float(value) for value in mean),
         std=tuple(float(value) for value in std),
     )
+
+
+def compute_train_mask_statistics(root: str | Path) -> dict[str, float | int]:
+    """Measure binary-label prevalence from the training split only."""
+    dataset = LevirCDDataset(root, split="train")
+    positive_pixels = 0
+    total_pixels = 0
+    for sample in dataset:
+        mask = _read_mask_tensor(sample.mask_path)
+        positive_pixels += int(mask.sum().item())
+        total_pixels += mask.numel()
+    if total_pixels == 0:
+        raise ValueError("Cannot compute mask statistics from an empty LEVIR-CD training split.")
+    return {
+        "positive_pixels": positive_pixels,
+        "total_pixels": total_pixels,
+        "positive_pixel_fraction": positive_pixels / total_pixels,
+    }
+
+
+def fingerprint_development_splits(root: str | Path) -> dict[str, object]:
+    """Create a path-independent SHA-256 fingerprint of train/validation data only."""
+    digest = hashlib.sha256()
+    split_digests: dict[str, str] = {}
+    for split in ("train", "val"):
+        split_digest = hashlib.sha256()
+        dataset = LevirCDDataset(root, split=split)
+        for sample in dataset:
+            for role, path in (("A", sample.before_path), ("B", sample.after_path), ("label", sample.mask_path)):
+                relative_name = f"{split}/{role}/{path.name}".encode("utf-8")
+                content_digest = hashlib.sha256(path.read_bytes()).digest()
+                split_digest.update(relative_name + b"\0" + content_digest)
+        split_digests[split] = split_digest.hexdigest()
+        digest.update(split.encode("utf-8") + b"\0" + split_digest.digest())
+    return {"algorithm": "sha256", "splits": split_digests, "development_splits_sha256": digest.hexdigest()}
 
 
 class LevirPairedDataset(Dataset[dict[str, torch.Tensor | str]]):

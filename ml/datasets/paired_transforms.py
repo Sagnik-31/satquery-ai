@@ -18,6 +18,8 @@ class PairedSpatialTransform:
     horizontal_flip_probability: float = 0.5
     vertical_flip_probability: float = 0.5
     rotate_90: bool = True
+    positive_crop_fraction: float = 0.5
+    negative_crop_attempts: int = 32
     seed: int | None = None
 
     def __post_init__(self) -> None:
@@ -26,9 +28,12 @@ class PairedSpatialTransform:
         for name, value in (
             ("horizontal_flip_probability", self.horizontal_flip_probability),
             ("vertical_flip_probability", self.vertical_flip_probability),
+            ("positive_crop_fraction", self.positive_crop_fraction),
         ):
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{name} must be between 0 and 1")
+        if self.negative_crop_attempts <= 0:
+            raise ValueError("negative_crop_attempts must be positive")
 
     def with_seed(self, seed: int) -> "PairedSpatialTransform":
         return replace(self, seed=seed)
@@ -55,7 +60,42 @@ class PairedSpatialTransform:
             if turns:
                 t1, t2, mask = (torch.rot90(value, turns, dims=(1, 2)) for value in (t1, t2, mask))
         height, width = t1.shape[1:]
-        top = rng.randint(0, height - self.patch_size)
-        left = rng.randint(0, width - self.patch_size)
+        top, left = self._select_crop(mask, height, width, rng)
         crop = lambda value: value[:, top : top + self.patch_size, left : left + self.patch_size].contiguous()
         return crop(t1), crop(t2), crop(mask)
+
+    def _select_crop(self, mask: torch.Tensor, height: int, width: int, rng: random.Random) -> tuple[int, int]:
+        """Select a deterministic positive or guaranteed-negative crop when available."""
+        maximum_top, maximum_left = height - self.patch_size, width - self.patch_size
+        positive_coordinates = torch.nonzero(mask[0] > 0, as_tuple=False)
+        if len(positive_coordinates) and rng.random() < self.positive_crop_fraction:
+            row, column = positive_coordinates[rng.randrange(len(positive_coordinates))].tolist()
+            return (
+                rng.randint(max(0, row - self.patch_size + 1), min(row, maximum_top)),
+                rng.randint(max(0, column - self.patch_size + 1), min(column, maximum_left)),
+            )
+
+        # Fast path for the typical sparse-change case.
+        for _ in range(self.negative_crop_attempts):
+            top, left = rng.randint(0, maximum_top), rng.randint(0, maximum_left)
+            if not bool(mask[:, top : top + self.patch_size, left : left + self.patch_size].any()):
+                return top, left
+
+        # If sparse random proposals missed, enumerate only as a deterministic
+        # fallback. This preserves genuine negative crops whenever they exist.
+        integral = torch.zeros((height + 1, width + 1), dtype=torch.int64)
+        integral[1:, 1:] = (mask[0] > 0).to(torch.int64).cumsum(0).cumsum(1)
+        sums = (
+            integral[self.patch_size :, self.patch_size :]
+            - integral[: -self.patch_size, self.patch_size :]
+            - integral[self.patch_size :, : -self.patch_size]
+            + integral[: -self.patch_size, : -self.patch_size]
+        )
+        negative_coordinates = torch.nonzero(sums == 0, as_tuple=False)
+        if len(negative_coordinates):
+            top, left = negative_coordinates[rng.randrange(len(negative_coordinates))].tolist()
+            return top, left
+
+        # A fully changed scene has no negative patch. Use an ordinary crop;
+        # this exceptional case is unavoidable and remains deterministic.
+        return rng.randint(0, maximum_top), rng.randint(0, maximum_left)

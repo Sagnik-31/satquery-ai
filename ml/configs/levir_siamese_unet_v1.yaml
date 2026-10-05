@@ -20,6 +20,18 @@ model:
   input_channels: 3
   base_channels: 24
 
+dataset:
+  identifier: LEVIR-CD
+  # The source distribution embeds no immutable version string locally; the
+  # train/val content fingerprint recorded at runtime identifies the exact copy.
+  version: local-official-split-unversioned
+
+sampling:
+  # A fixed development choice: request positive-containing crops half the
+  # time and preserve negative crops otherwise. Tune only on validation later.
+  positive_crop_fraction: 0.5
+  negative_crop_attempts: 32
+
 threshold:
   # Fixed avoids an unrecorded threshold search. If validation_iou_search is
   # intentionally enabled later, its candidate list is evaluated on val only.

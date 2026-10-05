@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 import random
+import hashlib
 
 import numpy as np
 import torch
@@ -22,7 +23,7 @@ def save_checkpoint(
     normalization: dict[str, list[float]],
     validation: dict[str, Any],
     provenance: dict[str, Any],
-) -> None:
+) -> str:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -35,6 +36,10 @@ def save_checkpoint(
             "normalization": normalization,
             "validation": validation,
             "provenance": provenance,
+            "architecture": provenance["architecture"],
+            "channel_schema": provenance["channel_schema"],
+            "config_sha256": provenance["config_sha256"],
+            "selected_validation_threshold": validation["selected_threshold"],
             "random_state": {
                 "python": random.getstate(),
                 "numpy": np.random.get_state(),
@@ -44,6 +49,9 @@ def save_checkpoint(
         },
         destination,
     )
+    checkpoint_hash = hashlib.sha256(destination.read_bytes()).hexdigest()
+    destination.with_suffix(destination.suffix + ".sha256").write_text(checkpoint_hash + "\n")
+    return checkpoint_hash
 
 
 def load_checkpoint(path: str | Path, *, device: torch.device) -> dict[str, Any]:
@@ -51,6 +59,7 @@ def load_checkpoint(path: str | Path, *, device: torch.device) -> dict[str, Any]
     required = {
         "model_state_dict", "optimizer_state_dict", "scheduler_state_dict", "config",
         "normalization", "validation", "provenance", "random_state", "epoch",
+        "architecture", "channel_schema", "config_sha256", "selected_validation_threshold",
     }
     missing = required.difference(payload)
     if missing:

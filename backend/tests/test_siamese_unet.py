@@ -48,3 +48,13 @@ def test_siamese_unet_cpu_forward_pass():
     with torch.inference_mode():
         output = model(torch.randn(1, 3, 32, 32), torch.randn(1, 3, 32, 32))
     assert output.device.type == "cpu"
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS is unavailable on this host")
+def test_siamese_unet_mps_smoke_forward_pass():
+    device = torch.device("mps")
+    model = SiameseUNet(base_channels=4).to(device).eval()
+    with torch.inference_mode():
+        output = model(torch.randn(1, 3, 32, 32, device=device), torch.randn(1, 3, 32, 32, device=device))
+    assert output.shape == (1, 1, 32, 32)
+    assert output.device.type == "mps"
