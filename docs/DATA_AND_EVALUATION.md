@@ -48,7 +48,7 @@ The local official LEVIR-CD structure contains 445 train, 64 validation, and 128
 
 The classical evaluator supports the official LEVIR-CD `test` layout (`test/A`, `test/B`, `test/label`) and calls the production classical detector. It interprets nonzero label pixels as change and aggregates global TP/TN/FP/FN into precision, recall, F1, and IoU. The measured locked classical result is precision 0.1238636852, recall 0.1067324675, F1 0.1146617287, and IoU 0.0608175893. It is a baseline comparison, not a tuning signal.
 
-The learned v1 foundation reads only train/val and has not been trained or evaluated. It is RGB LEVIR-CD only, not a validated Sentinel-2 model. Future Sentinel-2 experiments must establish their own data protocol with `[B02, B03, B04, B08, B11, B12]` in that fixed band order.
+The learned RGB LEVIR-CD v1 benchmark is complete and frozen. Its final locked-test record is `experiments/siamese_unet_levir_v1/FINAL_BENCHMARK.md`. The official LEVIR-CD test split must not be re-opened for development, threshold tuning, hyperparameter tuning, or qualitative selection. This RGB/VHR result is not a validated Sentinel-2 result and its weights must not be presented as Sentinel-2 weights. Future Sentinel-2 experiments must establish their own geographic data protocol, quality controls, and evaluation splits with `[B02, B03, B04, B08, B11, B12]` in that fixed band order.
 
 ## Presenting current output
 

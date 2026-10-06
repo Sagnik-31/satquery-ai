@@ -143,6 +143,28 @@ checkpoint-recorded normalization and threshold. It performs no tuning, threshol
 checkpoint comparison. The final JSON result is written under the ignored run
 directory and cannot be overwritten by the command.
 
+## Post-benchmark failure analysis
+
+`ml.evaluation.analyze_validation_failures` is validation-only. It ranks
+scenes by IoU, records per-scene TP/TN/FP/FN and precision/recall/F1/IoU,
+summarizes mean/median scene scores, flags false-positive/false-negative
+imbalance, and can save T1/T2/ground-truth/prediction/error images for the
+lowest-IoU validation scenes. It uses the checkpoint-recorded validation
+threshold and has no test-split argument.
+
+```bash
+python3 -m ml.evaluation.analyze_validation_failures \
+  --dataset-root "$HOME/datasets/LEVIR-CD" \
+  --checkpoint experiments/siamese_unet_levir_v1/runs/controlled_v2_20261005/checkpoints/best_val_iou.pt \
+  --config ml/configs/levir_siamese_unet_v1.yaml \
+  --output experiments/siamese_unet_levir_v1/runs/controlled_v2_20261005/validation_failure_analysis.json \
+  --artifact-dir experiments/siamese_unet_levir_v1/runs/controlled_v2_20261005/validation_failure_artifacts \
+  --max-artifacts 8
+```
+
+The final LEVIR-CD test benchmark is recorded in `FINAL_BENCHMARK.md`; it is
+frozen and must not be used in this analysis.
+
 Future Sentinel-2 work requires a separate dataset and validation protocol.
 Its planned channel order is `[B02, B03, B04, B08, B11, B12]`; this RGB model
 does not validate that schema or sensor domain.
