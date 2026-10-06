@@ -17,3 +17,5 @@ experiments/siamese_unet_levir_v1/metrics/
 experiments/siamese_unet_levir_v1/manifests/
 experiments/siamese_unet_levir_v1/normalization/
 experiments/siamese_unet_levir_v1/validation_artifacts/
+experiments/siamese_unet_levir_v1/runs/*/final_locked_test_result.json
+experiments/siamese_unet_levir_v1/runs/*/locked_test_artifacts/

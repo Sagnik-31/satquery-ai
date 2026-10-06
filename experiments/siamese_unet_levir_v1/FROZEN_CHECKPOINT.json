@@ -1,0 +1,17 @@
+{
+  "purpose": "One final locked LEVIR-CD test evaluation only; no further model or threshold selection is permitted before test.",
+  "checkpoint": "experiments/siamese_unet_levir_v1/runs/controlled_v2_20261005/checkpoints/best_val_iou.pt",
+  "checkpoint_sha256": "7375603ebe3392aeea5ae6c5517fd440267b6d75f7eb693d35cf18709314dbd1",
+  "selected_epoch": 17,
+  "validation": {
+    "precision": 0.8195986955064056,
+    "recall": 0.7161275134326704,
+    "f1": 0.7643773641541689,
+    "iou": 0.6186171586529112
+  },
+  "threshold": 0.5,
+  "git_revision": "66b533ebf10e7656fd25459c5c6d458ee1c0f48e",
+  "config_sha256": "97f4e25ac8e122f78622d31a73781cb1ca715c9c96858b55543bf534ec83208f",
+  "dataset_fingerprint": "1f12a0fd42ddcb6e4f2470dc04a192b0515d1dbbda1a866fd5964df19bb7e969",
+  "split_manifest_sha256": "931113948934b92519147f698d597591f324d71f48e8b0d25a769dc52d082eae"
+}

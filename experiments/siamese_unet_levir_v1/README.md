@@ -122,6 +122,27 @@ That command records `resume_exact=false` and the source checkpoint hash. It
 does not make the interrupted pilot equivalent to an uninterrupted 20-epoch
 run.
 
+## Final locked test benchmark
+
+`FROZEN_CHECKPOINT.json` freezes the controlled-v2 epoch-17 checkpoint and its
+SHA-256. No additional model selection or threshold selection is permitted
+before the final benchmark. The following command is intentionally a one-shot,
+explicitly confirmed test action; do not run it during development:
+
+```bash
+python3 -m ml.evaluation.evaluate_locked_test \
+  --dataset-root /Users/kuldeepsinghchauhan/datasets/LEVIR-CD \
+  --checkpoint experiments/siamese_unet_levir_v1/runs/controlled_v2_20261005/checkpoints/best_val_iou.pt \
+  --confirm-locked-test
+```
+
+It evaluates the locked 128-scene official test split exactly once. Before
+constructing the test dataset, it verifies the frozen checkpoint path, SHA-256,
+configuration hash, architecture, and channel schema, then uses the
+checkpoint-recorded normalization and threshold. It performs no tuning, threshold search, or
+checkpoint comparison. The final JSON result is written under the ignored run
+directory and cannot be overwritten by the command.
+
 Future Sentinel-2 work requires a separate dataset and validation protocol.
 Its planned channel order is `[B02, B03, B04, B08, B11, B12]`; this RGB model
 does not validate that schema or sensor domain.
